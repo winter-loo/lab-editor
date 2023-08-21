@@ -26,7 +26,7 @@ enum Mode {
 pub struct Editor {
     should_quit: bool,
     terminal: Terminal,
-    // bounded by terminal viewport dimension
+    // track cursor position in document
     cursor_position: Position,
     // distance from document head to viewport head
     offset: Position,
@@ -117,7 +117,10 @@ impl Editor {
             self.draw_rows();
             self.draw_status_bar();
             self.draw_prompt_bar();
-            Terminal::cursor_position(&self.cursor_position);
+            Terminal::cursor_position(&Position {
+                x: self.cursor_position.x.saturating_sub(self.offset.x),
+                y: self.cursor_position.y.saturating_sub(self.offset.y),
+            });
         }
 
         Terminal::cursor_show();
@@ -140,8 +143,8 @@ impl Editor {
         status = format!("{}", filename);
         let line_indicator = format!(
             "{}:{}",
-            self.offset.y + self.cursor_position.y + 1,
-            self.offset.x + self.cursor_position.x + 1
+            self.cursor_position.y.saturating_add(1),
+            self.cursor_position.x.saturating_add(1),
         );
         let len = status.len() + line_indicator.len();
         if width > len {
@@ -190,8 +193,8 @@ impl Editor {
     fn switch_to_insert_mode(&mut self, pressed_key: Key) {
         self.mode = Mode::Insert;
         self.prompt_line = "-- INSERT --".to_string();
-        if let Key::Char(c) = pressed_key {
-            let new_pos = self.doc.begin_insert(&self.cursor_position, c);
+        if let Key::Char(s) = pressed_key {
+            let new_pos = self.doc.begin_insert(&self.cursor_position, s);
             self.prompt_line = format!("{:?}", new_pos);
             self.move_cursor(&new_pos);
         }
@@ -202,38 +205,28 @@ impl Editor {
         let vw = self.terminal.size().width as usize;
         let vh = self.terminal.size().height as usize;
         let offset = &mut self.offset;
+        let extra_move = match self.mode {
+            Mode::Insert => 1,
+            _ => 0,
+        };
 
-        // update y first
-        if y == 0 {
-            offset.y = offset.y.saturating_sub(1);
-        } else if y >= self.doc.lines() {
-            offset.y = self.doc.lines().saturating_sub(vh);
-            y = vh.saturating_sub(1);
-        } else if y >= vh {
-            if y >= vh && offset.y + vh < self.doc.lines(){
-                offset.y = offset.y.saturating_add(1);
-            }
-            y = vh.saturating_sub(1);
+        if y >= self.doc.lines().saturating_add(extra_move) {
+            y = self.doc.lines().saturating_add(extra_move).saturating_sub(1);
+        }
+        if y >= vh {
+            offset.y = y - vh + 1;
+        } else {
+            offset.y = 0;
         }
 
-        let mut row_len = 0;
-        if let Some(row) = self.doc.row(y + offset.y) {
-            row_len = row.len();
+        let row = self.doc.row(y).unwrap();
+        if x >= row.len().saturating_add(extra_move) {
+            x = row.len().saturating_add(extra_move).saturating_sub(1);
         }
-
-        if x == row_len && row_len > vw {
-            offset.x = row_len - vw;
-            x = vw.saturating_sub(1);
-        } else if x == 0 {
+        if x >= vw {
+            offset.x = x - vw + 1;
+        } else {
             offset.x = 0;
-        } else if x >= vw {
-            if offset.x + vw < row_len {
-                offset.x = offset.x.saturating_add(x - vw + 1);
-            }
-            x = vw.saturating_sub(1);
-        } else if x >= row_len && row_len <= vw {
-            offset.x = 0;
-            x = row_len.saturating_sub(1);
         }
 
         self.cursor_position = Position { x, y };
@@ -261,14 +254,13 @@ impl Editor {
                 self.mode = Mode::Visual;
             }
             Key::Char('$') => {
-                let offset = &self.offset;
-                let row_len = if let Some(row) = self.doc.row(y + offset.y) {
+                let row_len = if let Some(row) = self.doc.row(y) {
                     row.len()
                 } else {
                     0
                 };
                 let new_pos = Position {
-                    x: row_len,
+                    x: row_len.saturating_sub(1),
                     y,
                 };
                 self.move_cursor(&new_pos);
@@ -276,14 +268,14 @@ impl Editor {
             Key::Char('0') => {
                 let new_pos = Position {
                     x: 0,
-                    y: self.cursor_position.y,
+                    y: y,
                 };
                 self.move_cursor(&new_pos);
             }
             Key::Char('G') => {
                 let new_pos = Position {
-                    x: self.cursor_position.x,
-                    y: self.doc.lines(),
+                    x,
+                    y: self.doc.lines() - 1,
                 };
                 self.move_cursor(&new_pos);
             }
@@ -291,10 +283,9 @@ impl Editor {
                if self.g_cmd_start {
                    self.g_cmd_start = false;
                    let new_pos = Position {
-                       x: self.cursor_position.x,
+                       x,
                        y: 0,
                    };
-                   self.offset.y = 0;
                    self.move_cursor(&new_pos);
                } else {
                    self.g_cmd_start = true;
@@ -335,9 +326,15 @@ impl Editor {
     fn in_insert_mode(&mut self, pressed_key: Key) {
         match pressed_key {
             Key::Char(c) => {
-                let new_pos = self.doc.insert(c, &self.cursor_position);
-                self.cursor_position = new_pos;
-                self.prompt_line = format!("inserted at {:?}, next at {:?}", self.cursor_position, new_pos);
+                let at = Position {
+                    x: self.cursor_position.x + self.offset.x,
+                    y: self.cursor_position.y + self.offset.y,
+                };
+                let new_pos = self.doc.insert(c, &at);
+                self.move_cursor(&new_pos);
+
+                self.prompt_line = format!("inserted at {:?}, next at {:?}, curosr: {:?}",
+                                           at, new_pos, self.cursor_position);
             }
             Key::Backspace => {
                 let new_pos = self.doc.backspace(&self.cursor_position);
@@ -353,6 +350,10 @@ impl Editor {
             Key::Esc => {
                 self.prompt_line = String::from("");
                 self.mode = Mode::Normal;
+                self.move_cursor(&Position {
+                    x: self.cursor_position.x - 1,
+                    y: self.cursor_position.y,
+                });
             }
             _ => (),
         }

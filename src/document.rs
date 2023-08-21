@@ -32,16 +32,22 @@ impl Document {
     pub fn begin_insert(&mut self, at: &Position, mode: char) -> Position {
         let mut new_at = Position { x: at.x, y: at.y };
         let current_row = self.row(at.y).unwrap();
+        let mut insert_line = false;
         match mode {
             'i' => (),
             'I' => new_at.x = current_row.head(),
-            'o' => new_at.y += 1,
-            'O' => new_at.y = at.y.saturating_sub(1),
+            'o' => {
+                insert_line = true;
+                new_at.y += 1;
+            }
+            'O' => {
+                insert_line = true;
+            }
             'a' => new_at.x = at.x + 1,
             'A' => new_at.x = current_row.len(),
             _ => (),
         }
-        if new_at.y != at.y {
+        if insert_line {
             let row = Row::default();
             self.rows.insert(new_at.y, row);
         }
